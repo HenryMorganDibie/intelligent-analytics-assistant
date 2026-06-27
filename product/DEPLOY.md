@@ -1,85 +1,126 @@
 # Deploying QueryMind
 
-Two services. Both free tiers available.
+Two services. Vercel for the frontend (always free). Three options for the backend.
 
 ```
 product/
-├── backend/    → Railway
-└── frontend/   → Vercel
+├── backend/    → Render (free) · Aeroplane (self-hosted) · Railway (paid)
+└── frontend/   → Vercel (free)
 ```
 
 ---
 
-## Step 1 — Deploy the backend to Railway
+## Backend options — pick one
 
-Railway auto-detects Python and runs the Procfile.
+### Option A: Render (recommended free option)
 
-### 1.1 Push to GitHub (already done)
+Render's free web service tier works well for QueryMind's backend because the backend
+is stateless — no database, no persistent storage. Users supply their own API keys
+per session, so cold starts (a few seconds on first request) are acceptable.
 
-The `product/backend/` folder is in this repo.
+**Steps:**
 
-### 1.2 Create a Railway project
+1. Go to [render.com](https://render.com) → **New** → **Web Service**
+2. Connect this GitHub repo
+3. Set **Root Directory** to `product/backend`
+4. Runtime: **Python 3**
+5. Build command: `pip install -r requirements.txt`
+6. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+7. Instance type: **Free**
+8. Click **Create Web Service**
 
-1. Go to [railway.app](https://railway.app) → **New Project**
-2. Choose **Deploy from GitHub repo**
-3. Select this repo (`intelligent-analytics-assistant`)
-4. Railway will ask which folder — set the **Root Directory** to `product/backend`
-5. Click **Deploy**
+Render gives you a URL like `https://querymind-backend.onrender.com`.
 
-Railway auto-detects Python via `requirements.txt` and uses the `Procfile` to start.
+**Copy this URL — you need it for the Vercel step.**
 
-### 1.3 Get your Railway URL
-
-Once deployed, go to your service → **Settings** → **Networking** → **Generate Domain**.
-
-You'll get something like: `https://querymind-backend-production.up.railway.app`
-
-**Copy this URL — you need it for Vercel.**
-
-### 1.4 No environment variables needed
-
-Users supply their own API keys through the UI. Railway just needs to run the server.
+No environment variables needed. Users bring their own API keys through the UI.
 
 ---
 
-## Step 2 — Deploy the frontend to Vercel
+### Option B: Aeroplane (free software, you bring a VPS)
 
-### 2.1 Import the repo
+Aeroplane is a self-hosted control plane — think Railway running on your own server.
+It's 100% free software. You pay only for the VPS, not for Aeroplane itself.
+
+**What you need first: a VPS**
+
+Cheapest options (all support Aeroplane):
+| Provider | Cheapest plan | Monthly cost |
+|---|---|---|
+| Hetzner | CX22 (2 vCPU, 4GB RAM) | ~€3.29 |
+| Vultr | Cloud Compute 1GB | $2.50 |
+| DigitalOcean | Basic Droplet 1GB | $4.00 |
+
+Any Ubuntu 22.04 or 24.04 VPS works.
+
+**Install Aeroplane on your VPS:**
+
+```bash
+# SSH into your VPS, then run:
+curl -fsSL https://get.aeroplane.run | sh
+```
+
+That one script sets up the full control plane — apps, domains, logs, PostgreSQL, Redis, Caddy (HTTPS), everything.
+
+**Deploy QueryMind backend on Aeroplane:**
+
+1. Open your Aeroplane dashboard (it runs on your VPS IP)
+2. **New App** → connect your GitHub repo
+3. Root directory: `product/backend`
+4. Build: `pip install -r requirements.txt`
+5. Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+6. Attach a domain or use the auto-generated one
+7. Deploy
+
+**Migrating from Railway?** Aeroplane has a built-in Railway import — connect your Railway token and it pulls services, variables, and databases across automatically.
+
+---
+
+### Option C: Railway (original, paid after free tier)
+
+If you get more credits or upgrade to the $5/month Hobby plan:
+
+1. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
+2. Root directory: `product/backend`
+3. Railway auto-detects Python and uses the `Procfile`
+4. Settings → Networking → Generate Domain
+
+---
+
+## Frontend — Vercel (always free)
+
+This step is the same regardless of which backend option you chose.
+
+### Steps:
 
 1. Go to [vercel.com](https://vercel.com) → **Add New Project**
-2. Import this GitHub repo
+2. Import this GitHub repo (`intelligent-analytics-assistant`)
 3. Set **Root Directory** to `product/frontend`
 4. Vercel auto-detects Vite
-
-### 2.2 Set environment variable
-
-In Vercel → Project Settings → Environment Variables, add:
+5. Before deploying → **Environment Variables** → add:
 
 | Name | Value |
-|------|-------|
-| `VITE_BACKEND_URL` | `https://your-railway-url.up.railway.app` |
+|---|---|
+| `VITE_BACKEND_URL` | Your backend URL from whichever option you chose |
 
-### 2.3 Deploy
+6. Click **Deploy**
 
-Click **Deploy**. Vercel builds the Vite app and gives you a URL like:
-`https://querymind.vercel.app`
+You'll get a URL like `https://querymind.vercel.app`.
 
 ---
 
-## Testing it end to end
+## Testing end to end
 
 1. Open your Vercel URL
 2. Click **Try free**
-3. Pick a provider (try **Groq** — it has a free tier, get a key at console.groq.com in 30 seconds)
-4. Paste your key, click **Test key** — should say "Connection successful"
-5. Click **Continue**, pick a schema template or paste your own
-6. Ask a question
-
-You should get a full analysis response with SQL, chart, and English narrative.
+3. Pick **Groq** — free tier, get a key at [console.groq.com](https://console.groq.com) in 30 seconds, no card needed
+4. Paste your key → **Test key** → should show "Connection successful"
+5. Pick a schema template or paste your own
+6. Ask a question — you should get a full analysis with SQL, chart, and English narrative
 
 ---
 
-## Running locally
+## Running locally (no deployment needed for development)
 
 ```bash
 # Terminal 1 — backend
@@ -106,32 +147,16 @@ Browser (Vercel)
     │  POST /query/schema
     │  { question, schema_ddl, provider, api_key, model }
     ▼
-Railway (FastAPI)
+Backend (Render / Aeroplane / Railway)
     │
-    ├── Calls LLM API (Claude / Groq / OpenAI) with user's key
+    ├── Routes to LLM provider (Claude / Groq / OpenAI) using the user's own key
     │   → generates SQL + mock data + narrative
     │
-    └── (live DB mode) executes real SQL, narrates real results
+    └── /query/live — executes real SQL against user's own database
     │
     ▼
-Browser renders headline + metrics + chart + SQL
+Browser renders: headline + key metrics + chart + SQL + English narrative
 ```
 
-The user's API key travels: Browser → Railway → LLM provider.
-It is never stored. Railway logs are under your control.
-
----
-
-## Live database connections (advanced)
-
-Once a user has a live PostgreSQL or MySQL database accessible from the internet,
-they can use `/query/live` instead of `/query/schema`.
-
-Update `ConnectPage` in `QueryMind.jsx` to send the connection string and use
-the `/query/live` endpoint. The backend will auto-introspect the schema,
-generate SQL, execute it against real data, and narrate actual results.
-
-**Supported databases:**
-- PostgreSQL (`postgresql://user:pass@host:5432/db`)
-- MySQL (`mysql+pymysql://user:pass@host:3306/db`)
-- SQLite (`sqlite:///path/to/file.db`) — for local testing only
+User's API key travels: Browser → Backend → LLM provider.
+It is never stored anywhere. Backend holds it only for the duration of the HTTP request.
