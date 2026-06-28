@@ -339,12 +339,41 @@ VALID TABLES AND COLUMNS (use ONLY these — no others):
 RULES:
 - Output ONLY a JSON object with one key: "sql"
 - SELECT or WITH only. Never INSERT/UPDATE/DELETE/DROP/ALTER.
-- MySQL-compatible. Use proper JOINs, GROUP BY with aggregates, LIMIT 50 max.
+- DuckDB-compatible SQL (standard SQL, supports QUALIFY, MEDIAN, PERCENTILE_CONT etc).
 - Only reference tables and columns from VALID TABLES AND COLUMNS above.
 - If the question cannot be answered from the schema, set sql to empty string "" and add "impossible": true.
+- Always include LIMIT — maximum 500 rows.
+- Aggregates (SUM/COUNT/AVG/MIN/MAX) must have matching GROUP BY.
 
 Output format — ONLY this JSON, nothing else:
 {{"sql": "SELECT ...", "impossible": false}}"""
+
+# File-mode SQL system — enforces aggregation so result sets are always small
+FILE_SQL_SYSTEM = """You are a senior SQL engineer writing DuckDB queries against a user's data file.
+
+TABLE NAME: dataset
+COLUMNS (the ONLY ones you may use):
+{schema_summary}
+
+CRITICAL RULES FOR LARGE FILES:
+- The table may have billions of rows. Your query MUST return a small result set (≤500 rows).
+- ALWAYS use aggregation (GROUP BY + COUNT/SUM/AVG/MIN/MAX) or LIMIT for detail queries.
+- NEVER write SELECT * without a LIMIT clause.
+- Use DuckDB-compatible SQL (supports QUALIFY, MEDIAN, PERCENTILE_CONT, LIST, STRUCT).
+- SELECT or WITH only. Never INSERT/UPDATE/DELETE/DROP/ALTER.
+- Only use column names from the list above — exactly as written.
+- If the question cannot be answered from the available columns, set impossible to true.
+
+For different question types:
+- "overview / summary / statistics" → aggregate ALL numeric columns with COUNT/SUM/AVG/MIN/MAX
+- "top N / bottom N" → GROUP BY the dimension, ORDER BY the metric, LIMIT N
+- "trend over time" → GROUP BY date/period column, ORDER BY date
+- "unique values / categories" → SELECT DISTINCT col, COUNT(*) GROUP BY col ORDER BY 2 DESC LIMIT 50
+- "nulls / missing" → SELECT col_name, COUNT(*) FILTER (WHERE col IS NULL) AS null_count for each col
+- "distribution" → GROUP BY ranges using CASE WHEN or integer division
+
+Output format — ONLY this JSON, nothing else:
+{{"sql": "SELECT ... (aggregated, ≤500 rows)", "impossible": false}}"""
 
 # Pass 2: Data generation
 DATA_SYSTEM = """You are a data simulation expert. Given a SQL query and the database schema, generate realistic sample data that the query WOULD return if run against a real populated database.
@@ -785,9 +814,13 @@ async def query_file(
 
     # ── Pass 1: Generate SQL ──────────────────────────────────────────────────
     schema_summary = extract_schema_summary(schema_ddl)
-    context = f"This is a {SUPPORTED_EXTENSIONS.get(suffix, 'data')} file named '{session['filename']}' with {row_count:,} rows."
+    context = (
+        f"This is a {SUPPORTED_EXTENSIONS.get(suffix, 'data')} file named "
+        f"'{session['filename']}' with {row_count:,} rows and {len(session['columns'])} columns."
+    )
 
-    sql_system = SQL_SYSTEM.format(schema=schema_ddl, schema_summary=schema_summary)
+    # Use the file-specific SQL prompt — enforces aggregation for large result sets
+    sql_system = FILE_SQL_SYSTEM.format(schema_summary=schema_summary)
     sql_user = f"{context}\n\nQuestion: {req.question}"
 
     sql_raw = await raw_llm_call(provider, api_key, model, sql_system, sql_user, max_tokens=800)
@@ -814,66 +847,77 @@ async def query_file(
     except HTTPException as e:
         raise HTTPException(status_code=400, detail=f"Generated SQL failed safety check: {e.detail}")
 
-    # ── Execute REAL SQL against the actual file via DuckDB ───────────────────
+    # ── Execute REAL SQL against DuckDB ──────────────────────────────────────
     try:
         con = duckdb.connect()
-        # Sessions always store a clean Parquet file after upload sanitization
         con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
-
         result_df = con.execute(sql).fetchdf()
         con.close()
-
         real_data = result_df.to_dict(orient="records")
         result_row_count = len(real_data)
-
     except duckdb.Error as e:
-        # SQL failed — retry with error context
         raise HTTPException(
             status_code=400,
             detail=f"SQL execution failed: {str(e)[:300]}. Try rephrasing your question."
         )
 
-    # ── Pass 3: Narrative on REAL data (no pass 2 needed — data is real) ─────
-    # Extract key metrics from real data
-    km_system = """You are a data analyst. Given a SQL result, extract 2-4 key metrics.
-Return ONLY JSON: {"keyMetrics": [{"label": "...", "value": "..."}]}
-Format values for humans: "$2.4M" not 2400000, "34%" not 0.34, "1,234" not 1234."""
+    # ── Smart result summarisation ────────────────────────────────────────────
+    # LLM never sees more than LLM_ROW_LIMIT rows — for billion-row files the
+    # SQL already aggregates, so result sets are always small. For detail queries
+    # with many rows we sample + summarise using DuckDB before sending to LLM.
+    LLM_ROW_LIMIT = 50
 
-    km_user = f"""SQL: {sql}
-Result ({result_row_count} rows): {json.dumps(real_data[:10], default=str)}
-Question: {req.question}"""
+    if result_row_count <= LLM_ROW_LIMIT:
+        llm_data = real_data
+        data_description = f"{result_row_count} rows"
+    else:
+        # Too many rows to send — summarise numerics, sample the rest
+        numeric_cols = [c for c in result_df.columns if result_df[c].dtype in
+                        ["int64","float64","int32","float32"]]
+        summary_parts = []
+        for col in numeric_cols[:8]:
+            s = result_df[col].describe()
+            summary_parts.append(
+                f"{col}: min={s['min']:.2f}, mean={s['mean']:.2f}, "
+                f"max={s['max']:.2f}, sum={result_df[col].sum():.2f}"
+            )
+        llm_data = real_data[:LLM_ROW_LIMIT]  # first N rows as sample
+        data_description = (
+            f"{result_row_count:,} rows (showing first {LLM_ROW_LIMIT} as sample)\n"
+            f"Numeric column summaries:\n" + "\n".join(summary_parts)
+        )
 
-    km_raw = await raw_llm_call(provider, api_key, model, km_system, km_user, max_tokens=400)
-    try:
-        km_result = parse_json_response(km_raw)
-        key_metrics = km_result.get("keyMetrics", [])
-        if not isinstance(key_metrics, list):
-            key_metrics = []
-    except Exception:
-        key_metrics = []
+    # ── Combined metrics + narrative call ─────────────────────────────────────
+    combined_system = """You are a senior business analyst. Given a SQL query result from a user's data file,
+return a JSON object with:
+- keyMetrics: 2-4 most important numbers, formatted for humans ("$2.4M", "34%", "1,234")
+- headline: one direct factual sentence stating the single most important finding
+- narrative: 4-6 sentences — main finding, business implication, second insight, caveat, recommended action
+- confidence: "high" (data directly answers question) | "medium" | "low"
+- vizType: "area" (time-series) | "bar" (ranked ≤20 rows) | "pie" (≤7 categories) | "stat" (1 number) | "stats" (2-4 numbers) | "table" (multi-col detail) | "line" (many time points)
 
-    # Narrative
-    narrative_user = f"""Question: {req.question}
+Ground every claim in the data provided. Do not invent numbers.
+Return ONLY valid JSON, no markdown."""
 
+    combined_user = f"""Question: {req.question}
+
+File: {session["filename"]} ({row_count:,} total rows, {len(session["columns"])} columns)
 SQL executed: {sql}
+Result: {data_description}
+Data sample: {json.dumps(llm_data, default=str)}"""
 
-REAL data returned ({result_row_count} rows from {row_count:,} total rows in file):
-{json.dumps(real_data[:25], default=str)}
-
-This is real data from the user's actual file. Every claim must be grounded in these exact numbers."""
-
-    narr_raw = await raw_llm_call(provider, api_key, model, NARRATIVE_SYSTEM, narrative_user, max_tokens=2000)
-    narr_result = parse_json_response(narr_raw)
+    combined_raw = await raw_llm_call(provider, api_key, model, combined_system, combined_user, max_tokens=1500)
+    combined_result = parse_json_response(combined_raw)
 
     return {
-        "sql": sql,
-        "data": real_data[:200],      # cap display at 200 rows
-        "keyMetrics": key_metrics,
-        "headline": narr_result.get("headline", ""),
-        "narrative": narr_result.get("narrative", ""),
-        "confidence": narr_result.get("confidence", "high"),   # real data = high confidence
-        "vizType": narr_result.get("vizType", "table"),
-        "mode": "file",
+        "sql":         sql,
+        "data":        real_data[:500],          # cap frontend display at 500 rows
+        "keyMetrics":  combined_result.get("keyMetrics", []),
+        "headline":    combined_result.get("headline", ""),
+        "narrative":   combined_result.get("narrative", ""),
+        "confidence":  "high",                   # always high — real data
+        "vizType":     combined_result.get("vizType", "table"),
+        "mode":        "file",
         "result_rows": result_row_count,
         "total_file_rows": row_count,
     }
