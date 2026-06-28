@@ -210,75 +210,122 @@ def validate_sql(sql: str) -> str:
 
     return cleaned
 
-# ── LLM caller ────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT_TEMPLATE = """You are QueryMind — a world-class business analyst and SQL expert.
+# ── Schema parser — prevents hallucinated column/table names ──────────────────
+def extract_schema_summary(ddl: str) -> str:
+    """Parse DDL into a strict column inventory the LLM must use."""
+    lines = []
+    current_table = None
+    for line in ddl.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("CREATE TABLE"):
+            parts = stripped.replace("(", " ").split()
+            if len(parts) >= 3:
+                current_table = parts[2].strip("`\"'[]")
+                lines.append(f"\nTABLE: {current_table}")
+                lines.append("  COLUMNS:")
+        elif current_table and stripped and not upper.startswith(
+            ("PRIMARY", "FOREIGN", "UNIQUE", "INDEX", "KEY", "--", ")", "CONSTRAINT", "CHECK")
+        ):
+            col = stripped.split()[0].strip("`\"'[],()")
+            col_rest = " ".join(stripped.split()[1:3]).rstrip(",").strip()
+            if col and col.upper() not in ("CONSTRAINT", "CHECK", "INDEX"):
+                lines.append(f"    - {col}  [{col_rest}]")
+        elif stripped.startswith(")"):
+            current_table = None
+    return "\n".join(lines) if lines else "(schema could not be parsed — use DDL above)"
 
-DATABASE SCHEMA:
+
+# ── LLM caller ────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT_TEMPLATE = """You are QueryMind — a precise SQL analyst and business interpreter.
+
+DATABASE SCHEMA (DDL):
 {schema}
 
-YOUR JOB:
-Translate the user's business question into an accurate SQL query, generate realistic sample data, and interpret the results like a senior analyst briefing a founder.
+VALID TABLES AND COLUMNS — you may ONLY use these:
+{schema_summary}
 
-STRICT RULES — follow every one exactly:
-1. ONLY generate SELECT or WITH (CTE) queries. Never INSERT, UPDATE, DELETE, DROP, ALTER, or any write operation.
-2. Only reference tables and columns that exist in the schema above. Never invent table or column names.
-3. If the question cannot be answered from the schema, set confidence to "low" and explain clearly in the narrative what data is missing.
-4. data must be realistic and internally consistent — if revenue is $500K total, individual rows must sum to that. Never contradict yourself.
-5. keyMetrics values must come directly from the data array — never fabricate numbers not present in the data.
-6. narrative must be 4-6 sentences written like a senior analyst briefing a founder: lead with the main finding, explain the business implication, flag any caveats or follow-up questions.
-7. vizType must match the actual shape of the data: use "area" for time-series, "pie" only if ≤7 categories, "stat"/"stats" for single-row results, "bar" for ranked comparisons, "table" for multi-column detail.
-8. headline must be a direct factual statement, not a question and not vague. Bad: "Revenue trends". Good: "Q3 revenue grew 18% driven by enterprise customers."
+YOUR TASK:
+Write a SQL SELECT query answering the question, generate realistic sample data the query would return, then interpret the results as a senior analyst briefing a founder.
 
-RESPOND WITH VALID JSON ONLY — no markdown, no backticks, no explanation outside the JSON:
+ANTI-HALLUCINATION RULES — breaking these breaks the product:
+- Use ONLY table and column names listed in VALID TABLES AND COLUMNS above. Never invent names.
+- keyMetrics values MUST appear in the data array. Do not fabricate standalone numbers.
+- Numbers must be internally consistent: individual rows must aggregate to totals.
+- If a question cannot be answered from the schema, set confidence="low" and explain what data is missing.
+
+SQL RULES:
+- SELECT or WITH (CTE) only. No INSERT/UPDATE/DELETE/DROP/ALTER.
+- MySQL-compatible syntax.
+- Always include LIMIT (max 50).
+- Aggregate functions (SUM/COUNT/AVG) must have matching GROUP BY.
+- Only JOIN tables that exist in the schema.
+
+vizType selection (must match the data shape):
+- "area"  → time-series data with dates/months/years
+- "bar"   → ranked list (2-20 rows, one label + one number column)
+- "pie"   → composition (2-7 categories max)
+- "stat"  → single row, single value
+- "stats" → single row, 2-4 values
+- "table" → multi-column detail (more than 2 columns or more than 20 rows)
+- "line"  → trend over many data points
+
+RESPOND WITH ONLY THIS JSON — no markdown, no backticks, no text outside the braces:
 {{
-  "sql": "SELECT ... (read-only, references only real schema columns)",
-  "data": [ ... up to 15 rows, internally consistent ... ],
-  "keyMetrics": [ {{"label": "string", "value": "formatted string e.g. $2.4M or 34%"}} ],
-  "headline": "Direct factual one-sentence finding",
-  "narrative": "4-6 sentences. Lead with finding. Explain business implication. Flag caveats.",
+  "sql": "SELECT ...",
+  "data": [...up to 15 rows, numbers internally consistent...],
+  "keyMetrics": [{{"label": "Total Revenue", "value": "$2.4M"}}],
+  "headline": "One direct factual sentence — e.g. Electronics drives 42% of revenue at 34% margin",
+  "narrative": "4-6 sentences: main finding → business implication → what to watch → recommended action",
   "confidence": "high | medium | low",
   "vizType": "bar | line | area | pie | table | stat | stats"
 }}"""
 
-DASHBOARD_SYSTEM_PROMPT = """You are QueryMind — a world-class business analyst.
+DASHBOARD_SYSTEM_PROMPT = """You are QueryMind — a precise SQL analyst and business interpreter.
 
-DATABASE SCHEMA:
+DATABASE SCHEMA (DDL):
 {schema}
 
-The user wants a complete business dashboard. Generate 4-6 panels that together give a complete picture of the business.
+VALID TABLES AND COLUMNS — you may ONLY use these:
+{schema_summary}
 
-STRICT RULES:
-1. Only reference tables and columns that EXIST in the schema. Never invent table or column names.
-2. Every SQL must be SELECT or WITH only. No write operations.
-3. Data in each panel must be realistic and internally consistent across all panels.
-4. Each panel must have a different angle: mix revenue, volume, trends, segments, outliers.
-5. keyMetrics values must come from the data — never fabricate numbers.
-6. Choose vizType to best communicate each panel's insight.
+Generate 4-6 dashboard panels giving a complete business overview. Each panel must cover a DIFFERENT angle (e.g. revenue trend, top products, customer breakdown, order status, profitability).
 
-RESPOND WITH VALID JSON ONLY:
+ANTI-HALLUCINATION RULES:
+- Use ONLY tables and columns in VALID TABLES AND COLUMNS above.
+- keyMetrics values MUST come from the data array in that panel.
+- Numbers must be consistent ACROSS panels: total orders cannot be 1,200 in one panel and 3,000 in another.
+- If a panel cannot be answered from the schema, set confidence="low".
+
+SQL RULES: SELECT or WITH only. LIMIT 50 max. MySQL-compatible.
+
+RESPOND WITH ONLY THIS JSON — no markdown, no backticks:
 {{
-  "title": "Dashboard title e.g. 'E-commerce Business Overview'",
+  "title": "Dashboard title",
   "summary": "2-3 sentence executive summary of overall business health",
   "panels": [
     {{
       "id": 1,
       "title": "Panel title",
       "sql": "SELECT ...",
-      "data": [ ...up to 12 rows... ],
-      "keyMetrics": [ {{"label": "...", "value": "..."}} ],
-      "headline": "Direct factual finding for this panel",
-      "narrative": "2-3 sentences interpreting this panel's data",
+      "data": [...up to 12 rows...],
+      "keyMetrics": [{{"label": "...", "value": "..."}}],
+      "headline": "Direct factual one-sentence finding",
+      "narrative": "2-3 sentences: finding → implication → caveat",
       "vizType": "bar | line | area | pie | table | stat | stats",
       "confidence": "high | medium | low"
     }}
   ]
-}}\n"""
+}}"""
+
 
 async def call_llm(provider: str, api_key: str, model: str, schema: str, question: str,
                    system_override: str = None) -> dict:
-    system = (system_override or SYSTEM_PROMPT_TEMPLATE).format(schema=schema)
+    schema_summary = extract_schema_summary(schema)
+    base = system_override or SYSTEM_PROMPT_TEMPLATE
+    system = base.format(schema=schema, schema_summary=schema_summary)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
         if provider == "claude":
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -289,7 +336,8 @@ async def call_llm(provider: str, api_key: str, model: str, schema: str, questio
                 },
                 json={
                     "model": model,
-                    "max_tokens": 1500,
+                    "max_tokens": 4000,
+                    "temperature": 0,
                     "system": system,
                     "messages": [{"role": "user", "content": question}],
                 },
@@ -308,7 +356,7 @@ async def call_llm(provider: str, api_key: str, model: str, schema: str, questio
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json={
                     "model": model,
-                    "max_tokens": 1500,
+                    "max_tokens": 4000,
                     "temperature": 0,
                     "messages": [
                         {"role": "system", "content": system},
@@ -322,14 +370,44 @@ async def call_llm(provider: str, api_key: str, model: str, schema: str, questio
         else:
             raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
 
-    clean = raw.strip().replace("```json", "").replace("```", "").strip()
+    # Strip markdown fences if present
+    clean = raw.strip()
+    for fence in ("```json", "```JSON", "```"):
+        clean = clean.replace(fence, "")
+    clean = clean.strip()
+
+    # Parse JSON
     try:
-        return json.loads(clean)
+        result = json.loads(clean)
     except json.JSONDecodeError:
         match = re.search(r"\{[\s\S]*\}", clean)
         if match:
-            return json.loads(match.group())
-        raise HTTPException(status_code=502, detail="LLM returned malformed JSON")
+            try:
+                result = json.loads(match.group())
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"LLM returned malformed JSON. Preview: {clean[:400]}"
+                )
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"No JSON in LLM response. Preview: {clean[:400]}"
+            )
+
+    # For single-query responses, validate required fields and types
+    if "panels" not in result:
+        required = ["sql", "data", "headline", "narrative", "confidence", "vizType"]
+        missing = [f for f in required if f not in result]
+        if missing:
+            raise HTTPException(status_code=502, detail=f"LLM response missing fields: {missing}")
+        if not isinstance(result.get("data"), list):
+            result["data"] = []
+        if not isinstance(result.get("keyMetrics"), list):
+            result["keyMetrics"] = []
+
+    return result
+
 
 def resolve_llm_config(req_provider, req_api_key, req_model, user: Optional[dict]) -> tuple[str, str, str]:
     """
