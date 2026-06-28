@@ -511,16 +511,16 @@ function LandingPage({ onStart, onSignIn }) {
           Your senior data analyst, on demand
         </div>
         <h1 style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"clamp(38px,7vw,70px)",fontWeight:900,lineHeight:1.05,letterSpacing:"-0.04em",marginBottom:"22px"}}>
-          Ask your database<br/><em style={{color:T.amber,fontStyle:"italic"}}>anything.</em>
+          Ask your data<br/><em style={{color:T.amber,fontStyle:"italic"}}>anything.</em>
         </h1>
         <p style={{fontSize:"17px",color:T.muted,lineHeight:"1.7",maxWidth:"540px",marginBottom:"40px"}}>
-          Drop in your SQL schema. Ask in plain English. Get honest, detailed answers — the same quality you'd expect from a senior analyst, without hiring one.
+          Upload a CSV, Excel, or Parquet file — or connect your SQL database. Ask questions in plain English. Get honest, detailed answers backed by your actual data.
         </p>
         <div style={{display:"flex",gap:"12px",flexWrap:"wrap",justifyContent:"center",marginBottom:"16px"}}>
-          <button onClick={onStart} style={{background:T.amber,color:T.bg,border:"none",borderRadius:"12px",padding:"15px 34px",fontSize:"15px",fontWeight:700,fontFamily:"'Fraunces',Georgia,serif"}}>Connect your database</button>
+          <button onClick={onStart} style={{background:T.amber,color:T.bg,border:"none",borderRadius:"12px",padding:"15px 34px",fontSize:"15px",fontWeight:700,fontFamily:"'Fraunces',Georgia,serif"}}>Analyse your data →</button>
           <button onClick={()=>document.getElementById("how")?.scrollIntoView({behavior:"smooth"})} style={{background:"transparent",color:T.white,border:`1px solid ${T.border}`,borderRadius:"12px",padding:"15px 26px",fontSize:"14px"}}>See how it works</button>
         </div>
-        <p style={{fontSize:"12px",color:T.mutedDark}}>MySQL · PostgreSQL · SQLite · any SQL database</p>
+        <p style={{fontSize:"12px",color:T.mutedDark}}>CSV · Excel · Parquet · JSON · MySQL · PostgreSQL · SQLite</p>
       </div>
 
       {/* Mock preview */}
@@ -532,13 +532,16 @@ function LandingPage({ onStart, onSignIn }) {
           <div style={{padding:"20px"}}>
             <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"14px"}}>
               <div style={{background:T.amber,color:T.bg,borderRadius:"14px 14px 4px 14px",padding:"11px 16px",fontSize:"13px",fontWeight:500,maxWidth:"75%"}}>
-                Which product category makes me the most money, and is it actually profitable?
+                I just uploaded my sales CSV — which region is actually driving growth?
               </div>
             </div>
             <div style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"14px 14px 14px 4px",padding:"16px 18px"}}>
-              <div style={{fontSize:"10px",color:T.amber,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:"7px"}}>Analysis</div>
-              <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"16px",fontWeight:700,marginBottom:"9px"}}>Electronics leads revenue but Apparel has the better margins</div>
-              <p style={{color:T.muted,fontSize:"13px",lineHeight:1.7}}>Electronics brings in 42% of your revenue but returns eat into margins — you're running at 34% gross. Apparel, your second-largest category, runs at 61% margin. If you want to grow revenue, double down on Electronics. If you want to improve profitability, Apparel is where to invest.</p>
+              <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"7px"}}>
+                <div style={{fontSize:"10px",color:T.amber,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>Analysis</div>
+                <span style={{fontSize:"10px",background:"#0D2818",border:"1px solid #10B98130",color:T.green,padding:"2px 7px",borderRadius:"20px"}}>⚡ Real data</span>
+              </div>
+              <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"16px",fontWeight:700,marginBottom:"9px"}}>West Africa drives 58% of growth despite being 31% of the customer base</div>
+              <p style={{color:T.muted,fontSize:"13px",lineHeight:1.7}}>Your West Africa region has grown 3.2× faster than every other region over the past 12 months. North America is larger by absolute revenue but has plateaued at 4% YoY. If you have budget to deploy, West Africa has the highest ROI per acquisition dollar right now.</p>
             </div>
           </div>
         </div>
@@ -553,9 +556,9 @@ function LandingPage({ onStart, onSignIn }) {
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:"20px"}}>
             {[
-              {n:"01",title:"Connect your schema",body:"Paste your CREATE TABLE statements, upload a .sql file, or pick a template. No data leaves your system."},
-              {n:"02",title:"Ask your question",body:"Type what you'd ask a data analyst. Revenue trends, best customers, product margins, churn rates — anything."},
-              {n:"03",title:"Get a real answer",body:"QueryMind writes the SQL, interprets the results, and tells you what it means for your business in plain English."},
+              {n:"01",title:"Connect your data",body:"Upload a CSV, Excel, Parquet, or JSON file — or paste your SQL schema. Any size, any format. Your data stays on your device during upload."},
+              {n:"02",title:"Ask your question",body:"Type exactly what you'd ask a data analyst. Revenue by region, top customers, churn trends, product margins — in plain English."},
+              {n:"03",title:"Get a real answer",body:"QueryMind runs actual SQL on your data, then interprets the results in plain English — with charts, key numbers, and honest business context."},
             ].map(({n,title,body})=>(
               <div key={n} style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"16px",padding:"26px"}}>
                 <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"44px",fontWeight:900,color:T.amberDim,lineHeight:1,marginBottom:"14px"}}>{n}</div>
@@ -563,6 +566,27 @@ function LandingPage({ onStart, onSignIn }) {
                 <p style={{color:T.muted,fontSize:"14px",lineHeight:"1.7"}}>{body}</p>
               </div>
             ))}
+          </div>
+
+          {/* Format strip */}
+          <div style={{marginTop:"48px",padding:"24px",background:T.bg,border:`1px solid ${T.border}`,borderRadius:"16px",textAlign:"center"}}>
+            <div style={{fontSize:"12px",color:T.mutedDark,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:"16px"}}>Works with any data format</div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:"12px",justifyContent:"center"}}>
+              {[
+                {icon:"📊",label:"CSV / TSV"},
+                {icon:"📗",label:"Excel .xlsx"},
+                {icon:"⚡",label:"Parquet"},
+                {icon:"📋",label:"JSON"},
+                {icon:"🗄️",label:"MySQL"},
+                {icon:"🐘",label:"PostgreSQL"},
+                {icon:"🪶",label:"SQLite"},
+              ].map(({icon,label})=>(
+                <div key={label} style={{display:"flex",alignItems:"center",gap:"7px",background:T.surface,border:`1px solid ${T.border}`,borderRadius:"10px",padding:"8px 14px"}}>
+                  <span style={{fontSize:"16px"}}>{icon}</span>
+                  <span style={{fontSize:"13px",color:T.muted}}>{label}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -580,7 +604,7 @@ function LandingPage({ onStart, onSignIn }) {
             <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"44px",fontWeight:900,marginBottom:"6px"}}>$0</div>
             <p style={{color:T.muted,fontSize:"14px",marginBottom:"24px"}}>Bring your own API key from Claude, Groq, or OpenAI.</p>
             <div style={{display:"flex",flexDirection:"column",gap:"10px",marginBottom:"28px"}}>
-              {["All 3 LLM providers","All schema templates","File upload (.sql)","Full analyst chat","Open source — self-host it"].map(f=>(
+              {["All 3 LLM providers","CSV, Excel, Parquet, JSON upload","SQL schema templates","Full analyst chat + dashboard","Open source — self-host it"].map(f=>(
                 <div key={f} style={{display:"flex",gap:"10px",alignItems:"center",fontSize:"14px",color:T.muted}}>
                   <span style={{color:T.green,fontSize:"16px"}}>✓</span>{f}
                 </div>
