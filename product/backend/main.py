@@ -39,7 +39,15 @@ STRIPE_SECRET_KEY    = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.getenv("STRIPE_PRICE_ID", "")  # your $19/mo price ID
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://querymind-ten.vercel.app")
+
+# Build allowed origins list — always include the Vercel URL and localhost
+ALLOWED_ORIGINS = [
+    FRONTEND_URL,
+    "https://querymind-ten.vercel.app",   # hardcoded as safe fallback
+    "http://localhost:3000",
+    "http://localhost:5173",
+]
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -79,7 +87,7 @@ app = FastAPI(title="QueryMind API", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
