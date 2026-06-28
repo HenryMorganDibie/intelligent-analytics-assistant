@@ -2,14 +2,13 @@
 
 # ◈ QueryMind
 
-**Ask your database anything. Get answers in plain English.**
+**Your AI business analyst. Ask questions in English. Get charts, insights, and decisions.**
 
-[![Live Demo](https://img.shields.io/badge/DEMO-Watch_on_Drive-red?style=for-the-badge&logo=googledrive)](https://drive.google.com/file/d/1YivR_t3VJO-8fq8rkfKJCjIIf5k0ctCw/view?usp=sharing)
-![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi)
-![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)
-![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vitejs.dev)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 </div>
 
@@ -17,11 +16,11 @@
 
 ## What is QueryMind?
 
-QueryMind is an AI-powered data analyst for business owners, founders, and operators who work with SQL databases but don't write SQL themselves.
+Most people who work with data are not SQL writers. They know what question they want answered — *"Why did revenue drop last month?"*, *"Who are my best customers?"*, *"Is product X actually profitable?"* — they just can't express it as a query.
 
-You paste your database schema (the `CREATE TABLE` statements). You ask a question in plain English — *"Which product makes me the most money?"*, *"Why did revenue drop last month?"*, *"Who are my top 10 customers?"*. QueryMind writes the SQL, runs it, and comes back with a headline finding, a chart, key numbers, and a plain-English narrative that explains what the data actually means for your business.
+QueryMind is an AI analyst for founders, operators, and business owners. You drop in your SQL schema. You ask your question in plain English. QueryMind writes the SQL, interprets the results, and tells you what the data means for your business — the same quality you'd expect from a senior analyst, on demand.
 
-It is not a chatbot. It behaves like a senior analyst who happens to have read every table in your database.
+> It is not a chatbot. It behaves like a senior analyst who happens to have read every table in your database.
 
 ---
 
@@ -29,81 +28,140 @@ It is not a chatbot. It behaves like a senior analyst who happens to have read e
 
 ```
 You ask a question in plain English
-        ↓
-Backend reads your schema + question → asks your chosen LLM to write SQL
-        ↓
-SQL executes against your database (or generates realistic mock data in schema-only mode)
-        ↓
-LLM interprets the result rows → writes a business narrative
-        ↓
-Frontend renders: headline · key metrics · chart · narrative · SQL (collapsible)
+          ↓
+Schema + Prompt
+          ↓
+LLM (Claude / Groq / OpenAI)
+          ↓
+Generated SQL  ──► Safety validation (SELECT only)
+          ↓
+Execution Engine
+          ↓
+Metrics + Results
+          ↓
+Analyst Narrative
+          ↓
+Dashboard
 ```
 
-You bring your own LLM API key — Claude, Groq, or OpenAI. QueryMind never stores it.
+QueryMind only ever runs `SELECT` and `WITH` queries. It will never `INSERT`, `UPDATE`, `DELETE`, `DROP`, or modify your data in any way.
+
+---
+
+## Safe execution
+
+QueryMind enforces read-only access at the backend level, regardless of what the LLM generates:
+
+```python
+ALLOWED     = ("SELECT", "WITH", "EXPLAIN")
+BLOCKED     = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
+               "TRUNCATE", "CREATE", "REPLACE", "MERGE")
+
+if not sql.upper().startswith(ALLOWED):
+    raise Exception("Only read queries permitted")
+
+for kw in BLOCKED:
+    if re.search(rf"\b{kw}\b", sql.upper()):
+        raise Exception(f"Blocked keyword: {kw}")
+```
+
+Every SQL string from the LLM is validated before execution. Queries without a `LIMIT` clause have one added automatically (default 500 rows).
 
 ---
 
 ## Repository layout
 
 ```
-intelligent-analytics-assistant/
+querymind/
 │
-├── product/                        ← deployable product (start here)
-│   ├── frontend/                   → Vite + React → deploy to Vercel
-│   │   ├── src/QueryMind.jsx       → full UI: landing, API key, connect, analyst chat
+├── product/                        ← deployable product
+│   ├── frontend/                   → Vite + React  →  Vercel (free)
+│   │   ├── src/QueryMind.jsx       → full UI: landing, auth, connect, analyst, dashboard
 │   │   ├── src/main.jsx
 │   │   ├── index.html
 │   │   ├── package.json
 │   │   ├── vite.config.js
 │   │   └── vercel.json
 │   │
-│   ├── backend/                    → FastAPI → deploy to Render (free) or any server
-│   │   ├── main.py                 → LLM routing, SQL execution, schema introspection
+│   ├── backend/                    → FastAPI  →  Render (free tier)
+│   │   ├── main.py                 → auth, LLM routing, SQL safety, dashboard
 │   │   ├── requirements.txt
 │   │   ├── Procfile
-│   │   ├── render.yaml
-│   │   └── railway.json
+│   │   ├── render.yaml             → pins Python 3.11, free plan
+│   │   ├── railway.json
+│   │   └── .env.example
 │   │
 │   └── DEPLOY.md                   → step-by-step deployment guide
 │
-├── backend/                        ← original prototype (hardcoded MySQL + Gemini)
-│   └── main.py
-│
+├── backend/                        ← original prototype (MySQL + Gemini, hardcoded)
 ├── frontend/                       ← original Streamlit frontend
-│   └── app.py
-│
-├── dataspeak/                      ← earlier standalone component iterations
-│   ├── DataSpeak.jsx
-│   └── QueryMind.jsx
-│
-├── data_loader.py                  ← one-time script: loads Excel data into MySQL
+├── dataspeak/                      ← earlier component iterations
+├── data_loader.py
 ├── LICENSE
 └── README.md
 ```
 
 ---
 
+## Features
+
+### Analyst Chat
+Ask any business question in plain English. QueryMind responds with:
+- **Headline** — the single most important finding, stated directly
+- **Key metrics** — 2–4 numbers that matter most, pulled from the data
+- **Chart** — auto-selected visualization (area for trends, bar for rankings, pie for composition, table for detail)
+- **Narrative** — 4–6 sentences written like a senior analyst briefing a founder: main finding → business implication → caveats
+- **SQL** — the generated query, collapsible, so technical users can verify
+
+### Dashboard Generation
+One click generates a complete 4–6 panel business overview from your schema. Each panel covers a different angle — revenue, volume, trends, customer segments, product performance. Panels are laid out in a responsive grid.
+
+### SQL Safety Layer
+Every query is validated server-side before execution. Only `SELECT` and `WITH` are permitted. Write operations are blocked regardless of what the LLM generates.
+
+### Multi-Provider AI
+Bring your own API key, or upgrade to Pro and use QueryMind's key:
+
+| Provider | Free tier | Best model |
+|---|---|---|
+| **Groq** | Yes — [console.groq.com](https://console.groq.com) | Llama 3.3 70B |
+| **Claude** | No — [console.anthropic.com](https://console.anthropic.com) | Claude Sonnet 4.6 |
+| **OpenAI** | No — [platform.openai.com](https://platform.openai.com) | GPT-4o |
+
+---
+
+## Pricing tiers
+
+| | Free | Pro |
+|---|---|---|
+| **Price** | $0 | $19/month |
+| **API key** | Bring your own | QueryMind's key |
+| **All providers** | ✓ | ✓ |
+| **Dashboard generation** | ✓ | ✓ |
+| **SQL safety layer** | ✓ | ✓ |
+| **Setup friction** | Pick provider + paste key | Sign up, done |
+
+---
+
 ## Deploying (10 minutes)
 
-Full instructions are in [`product/DEPLOY.md`](product/DEPLOY.md). Short version:
+See [`product/DEPLOY.md`](product/DEPLOY.md) for the full guide. Short version:
 
-### Backend → Render (free tier)
+### Backend → Render (free)
 
-1. [render.com](https://render.com) → **New Web Service** → connect this repo
+1. [render.com](https://render.com) → New Web Service → connect this repo
 2. Root directory: `product/backend`
-3. Build command: `pip install -r requirements.txt`
-4. **Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`**
-5. Plan: **Free** → Deploy
-6. Copy your Render URL once it's live
+3. Build: `pip install -r requirements.txt`
+4. **Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`**
+5. Plan: Free → Deploy
+6. Copy the Render URL
 
 ### Frontend → Vercel (free)
 
-1. [vercel.com](https://vercel.com) → **New Project** → import this repo
+1. [vercel.com](https://vercel.com) → New Project → import this repo
 2. Root directory: `product/frontend`
-3. Environment variable: `VITE_BACKEND_URL` = your Render URL
+3. Env var: `VITE_BACKEND_URL` = your Render URL
 4. Deploy
-
-Open your Vercel URL. Done.
 
 ---
 
@@ -115,138 +173,70 @@ cd product/backend
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 
-# Frontend (separate terminal)
+# Frontend
 cd product/frontend
 npm install
 echo "VITE_BACKEND_URL=http://localhost:8000" > .env.local
 npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000)
-
----
-
-## User flow
-
-```
-Landing page
-    ↓ "Try free"
-Choose AI provider
-    → Claude (Anthropic) — best reasoning
-    → Groq — free tier, fastest (get key at console.groq.com, no card needed)
-    → OpenAI (ChatGPT) — widely familiar
-    ↓ Paste API key (masked) → Test key → Continue
-Connect your database
-    → Pick a template (e-commerce, SaaS, restaurant)
-    → Paste your own CREATE TABLE statements
-    → Upload a .sql file
-    ↓
-Analyst chat
-    → Ask questions in plain English
-    → Get: headline + key metrics + chart + narrative + SQL
-    → Ask follow-ups
+# → http://localhost:3000
 ```
 
 ---
 
 ## Backend API
 
-### `POST /query/schema`
-Schema-only mode. No live database needed. LLM generates SQL and realistic mock data.
-
-```json
-{
-  "question": "Which product category makes the most money?",
-  "schema_ddl": "CREATE TABLE orders (...); CREATE TABLE order_items (...);",
-  "provider": "groq",
-  "api_key": "gsk_...",
-  "model": "llama-3.3-70b-versatile"
-}
-```
-
-Response includes: `sql`, `data`, `keyMetrics`, `headline`, `narrative`, `confidence`, `vizType`
-
-### `POST /query/live`
-Live database mode. Connects to a real database, executes the generated SQL, narrates real results.
-
-```json
-{
-  "question": "What is my monthly revenue trend?",
-  "connection_string": "postgresql://user:pass@host:5432/mydb",
-  "provider": "claude",
-  "api_key": "sk-ant-...",
-  "model": "claude-sonnet-4-6"
-}
-```
-
-### `POST /introspect`
-Auto-detects schema from a live database connection string. Returns `schema_ddl` and table list.
-
-### `GET /`
-Health check. Returns `{"status": "ok"}`.
-
----
-
-## Supported LLM providers
-
-| Provider | Free tier | Models |
+| Endpoint | Method | Description |
 |---|---|---|
-| **Groq** | Yes — [console.groq.com](https://console.groq.com) | Llama 3.3 70B, Llama 3.1 8B, Mixtral 8x7B |
-| **Claude** | No — [console.anthropic.com](https://console.anthropic.com) | Claude Sonnet 4.6, Claude Haiku 4.5 |
-| **OpenAI** | No — [platform.openai.com](https://platform.openai.com) | GPT-4o, GPT-4o Mini |
-
-Groq is the easiest starting point — free tier, no credit card, key in 30 seconds.
+| `/` | GET | Health check |
+| `/auth/signup` | POST | Create account |
+| `/auth/login` | POST | Login, returns JWT |
+| `/auth/me` | GET | Current user + pro status |
+| `/query/schema` | POST | Ask a question (schema-only mode) |
+| `/query/live` | POST | Ask a question (live DB execution) |
+| `/dashboard` | POST | Generate full multi-panel dashboard |
+| `/introspect` | POST | Auto-detect schema from connection string |
+| `/billing/checkout` | POST | Stripe checkout session |
+| `/billing/stripe-webhook` | POST | Stripe events (payment, cancellation) |
+| `/billing/portal` | POST | Stripe customer portal |
 
 ---
 
-## Supported databases (live mode)
+## Environment variables (Render)
 
-| Database | Connection string format |
+| Variable | Description |
 |---|---|
-| PostgreSQL | `postgresql://user:pass@host:5432/dbname` |
-| MySQL | `mysql+pymysql://user:pass@host:3306/dbname` |
-| SQLite | `sqlite:///path/to/file.db` |
-
-More can be added by installing the relevant SQLAlchemy dialect driver.
-
----
-
-## Security
-
-- API keys are entered by the user in the browser, sent to the backend for a single request, and never stored
-- The backend holds a key only for the duration of one HTTP call
-- No database credentials are stored — connection strings are passed per-request in live mode
-- CORS is currently open (`*`) — before going to production, set `ALLOWED_ORIGIN` in your backend environment to your Vercel domain
+| `SECRET_KEY` | JWT secret — `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `QM_PROVIDER` | `groq` (recommended for cost) |
+| `QM_API_KEY` | Your Groq/Claude/OpenAI key for Pro users |
+| `QM_MODEL` | `llama-3.3-70b-versatile` |
+| `FRONTEND_URL` | Your Vercel URL (used for CORS + Stripe redirects) |
+| `STRIPE_SECRET_KEY` | From Stripe dashboard |
+| `STRIPE_WEBHOOK_SECRET` | From Stripe → Webhooks |
+| `STRIPE_PRICE_ID` | Your $19/mo recurring price ID |
 
 ---
 
 ## Roadmap
 
-- [ ] Live database connection via UI (currently schema-paste only in frontend)
+- [ ] Live database connections via UI (currently schema-paste only)
 - [ ] Multi-turn conversation with memory of previous results
-- [ ] Query history saved per session
-- [ ] Export to CSV / PDF
-- [ ] Auth + per-user workspaces
-- [ ] Dialect selector (BigQuery, Snowflake, DuckDB)
-- [ ] Confidence-based SQL retry on execution failure
-
----
-
-## Original prototype
-
-The `backend/` and `frontend/` folders at the root contain the original proof-of-concept: a Streamlit UI + FastAPI backend hardwired to a specific MySQL database with 1.3M rows, using Gemini or Ollama for SQL generation. Setup instructions for that version are in the original commit history.
-
-The `product/` folder is the current, deployable version.
+- [ ] Scheduled reports via email / Slack
+- [ ] Query history and saved analyses
+- [ ] CSV / PDF export
+- [ ] Startup ($79/mo) and Team ($299/mo) tiers
+- [ ] Tenant isolation for multi-workspace Pro accounts
+- [ ] Observability: query logging, error tracking, usage metrics
 
 ---
 
 ## Contributing
 
-PRs welcome. Most useful contributions right now:
+Open source under MIT. PRs welcome.
 
-1. **Live DB UI** — wire the Connect page to send a real connection string and use `/query/live`
-2. **SQL retry** — if execution fails, re-prompt the LLM with the error message and retry once
-3. **Dialect support** — test SQL generation accuracy for PostgreSQL-specific syntax
+Most valuable contributions right now:
+1. **Live DB connector** — wire the Connect page to `/query/live` with a real connection string
+2. **SQL retry** — if execution fails, re-prompt the LLM with the error and retry once
+3. **Export** — PDF/CSV download of dashboard panels and analysis results
 
 Open an issue before large PRs.
 
@@ -254,7 +244,7 @@ Open an issue before large PRs.
 
 ## License
 
-MIT — use it, fork it, build products with it.
+MIT — use it, fork it, build on it.
 
 ---
 

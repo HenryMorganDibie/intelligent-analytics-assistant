@@ -232,6 +232,79 @@ function SmartViz({ data, vizType }) {
 }
 
 // ─── ANALYST MESSAGE ──────────────────────────────────────────────────────────
+// ─── DASHBOARD MESSAGE ────────────────────────────────────────────────────────
+function DashboardMessage({ msg }) {
+  const [expanded, setExpanded] = useState(null); // panel id with expanded SQL
+
+  if (!msg.panels) return null;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"12px",animation:"slideIn 0.4s ease"}}>
+      {/* Summary header */}
+      <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"16px",padding:"20px 24px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"10px",marginBottom:"12px"}}>
+          <div style={{width:"26px",height:"26px",background:T.amberDim,border:`1px solid ${T.amberBorder}`,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px"}}>◈</div>
+          <span style={{fontSize:"11px",color:T.amber,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>Dashboard</span>
+          <span style={{marginLeft:"auto",fontSize:"11px",color:T.mutedDark}}>{msg.panels.length} panels</span>
+        </div>
+        <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"20px",fontWeight:700,color:T.white,marginBottom:"8px",letterSpacing:"-0.02em"}}>{msg.title}</div>
+        <p style={{color:T.muted,fontSize:"14px",lineHeight:"1.7"}}>{msg.summary}</p>
+      </div>
+
+      {/* Panels grid */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:"12px"}}>
+        {msg.panels.map(panel => (
+          <div key={panel.id} style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"14px",overflow:"hidden"}}>
+            <div style={{padding:"14px 18px",borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",gap:"8px"}}>
+              <span style={{fontSize:"11px",color:T.amber,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.07em",flex:1}}>{panel.title}</span>
+              {panel.confidence && (
+                <span style={{fontSize:"10px",color:panel.confidence==="high"?T.green:panel.confidence==="medium"?T.amber:T.muted,background:`${panel.confidence==="high"?T.green:T.amber}15`,padding:"2px 8px",borderRadius:"20px",whiteSpace:"nowrap"}}>
+                  {panel.confidence==="high"?"✓ High":panel.confidence==="medium"?"⚠ Medium":"↓ Low"}
+                </span>
+              )}
+            </div>
+            <div style={{padding:"14px 18px",display:"flex",flexDirection:"column",gap:"12px"}}>
+              {/* Key metrics row */}
+              {panel.keyMetrics?.length>0 && (
+                <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                  {panel.keyMetrics.map((m,i)=>(
+                    <div key={i} style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"8px",padding:"8px 12px",minWidth:"80px"}}>
+                      <div style={{fontSize:"18px",fontWeight:700,color:T.amber,fontFamily:"'Fraunces',Georgia,serif"}}>{m.value}</div>
+                      <div style={{fontSize:"10px",color:T.muted,marginTop:"2px"}}>{m.label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Headline */}
+              <div style={{fontFamily:"'Fraunces',Georgia,serif",fontSize:"15px",fontWeight:700,color:T.white,lineHeight:1.35}}>{panel.headline}</div>
+              {/* Chart */}
+              {panel.data?.length>0 && <SmartViz data={panel.data} vizType={panel.vizType}/>}
+              {/* Narrative */}
+              <p style={{color:T.muted,fontSize:"13px",lineHeight:"1.65"}}>{panel.narrative}</p>
+            </div>
+            {/* SQL toggle */}
+            {panel.sql && (
+              <div style={{borderTop:`1px solid ${T.border}`}}>
+                <button onClick={()=>setExpanded(expanded===panel.id?null:panel.id)}
+                  style={{width:"100%",padding:"9px 18px",background:"none",border:"none",color:T.mutedDark,fontSize:"11px",textAlign:"left",display:"flex",alignItems:"center",gap:"6px"}}>
+                  <span style={{color:T.blue,fontFamily:"monospace"}}>SQL</span>
+                  {expanded===panel.id?"Hide":"Show"} query
+                  <span style={{marginLeft:"auto"}}>{expanded===panel.id?"↑":"↓"}</span>
+                </button>
+                {expanded===panel.id && (
+                  <div style={{padding:"0 18px 14px"}}>
+                    <pre style={{background:T.bg,border:`1px solid ${T.border}`,borderRadius:"8px",padding:"10px 14px",fontFamily:"monospace",fontSize:"11.5px",color:"#7DD3FC",lineHeight:1.6,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{panel.sql}</pre>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AnalystMessage({ msg }) {
   const [showSQL, setShowSQL] = useState(false);
   const [vis, setVis] = useState({h:false,n:false,v:false});
@@ -738,18 +811,43 @@ function AnalystPage({ db, llmConfig, user, onBack }) {
   const [messages, setMessages] = useState([{
     id: 0, role: "assistant", type: "welcome",
     isPro,
-    text: `I've read ${db.dbName}. Ask me anything about your business.`,
+    text: `I've read ${db.dbName}. Ask me anything about your business, or tap "Generate Dashboard" for a complete overview.`,
     questions: db.questions,
     onAsk: () => {},
   }]);
   const [input, setInput]         = useState("");
   const [loading, setLoading]     = useState(false);
   const [loadingText, setLoadingText] = useState("");
+  const [dashLoading, setDashLoading] = useState(false);
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
   const idRef     = useRef(1);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({behavior:"smooth"}); }, [messages, loading]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({behavior:"smooth"}); }, [messages, loading, dashLoading]);
+
+  const generateDashboard = useCallback(async () => {
+    if (loading || dashLoading) return;
+    setDashLoading(true);
+    setMessages(prev => [...prev, {id:idRef.current++, role:"user", text:"Generate a complete business dashboard for this database."}]);
+
+    const phases = ["Analysing your schema…","Planning dashboard panels…","Building charts…","Writing insights…"];
+    let pi = 0; setLoadingText(phases[0]);
+    const iv = setInterval(() => { pi=(pi+1)%phases.length; setLoadingText(phases[pi]); }, 2000);
+
+    try {
+      const body = {
+        schema_ddl: db.schema,
+        ...(llmConfig ? { provider: llmConfig.provider, api_key: llmConfig.apiKey, model: llmConfig.model } : {}),
+      };
+      const result = await apiFetch("/dashboard", { method:"POST", body: JSON.stringify(body) });
+      setMessages(prev => [...prev, { id:idRef.current++, role:"assistant", type:"dashboard", ...result }]);
+    } catch (err) {
+      setMessages(prev => [...prev, { id:idRef.current++, role:"assistant", type:"error", text: err.message || "Dashboard generation failed." }]);
+    }
+
+    clearInterval(iv); setDashLoading(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  }, [loading, dashLoading, db.schema, llmConfig]);
 
   const ask = useCallback(async (question) => {
     if (!question.trim() || loading) return;
@@ -811,10 +909,12 @@ function AnalystPage({ db, llmConfig, user, onBack }) {
           <div key={msg.id} style={{animation:"slideIn 0.35s ease"}}>
             {msg.role==="user"
               ? <div style={{display:"flex",justifyContent:"flex-end"}}><div style={{background:T.amber,color:T.bg,borderRadius:"16px 16px 4px 16px",padding:"12px 18px",maxWidth:"78%",fontSize:"14px",fontWeight:500,lineHeight:"1.5"}}>{msg.text}</div></div>
-              : <AnalystMessage msg={msg}/>}
+              : msg.type==="dashboard"
+                ? <DashboardMessage msg={msg}/>
+                : <AnalystMessage msg={msg}/>}
           </div>
         ))}
-        {loading && (
+        {(loading || dashLoading) && (
           <div style={{animation:"slideIn 0.3s ease"}}>
             <div style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:"16px",padding:"18px 22px",display:"flex",alignItems:"center",gap:"12px"}}>
               <div style={{display:"flex",gap:"5px"}}>
@@ -830,6 +930,13 @@ function AnalystPage({ db, llmConfig, user, onBack }) {
       {/* Input */}
       <div style={{padding:"14px 18px 18px",borderTop:`1px solid ${T.border}`,background:T.bg,position:"sticky",bottom:0}}>
         <div style={{maxWidth:"840px",margin:"0 auto"}}>
+          {/* Dashboard button row */}
+          <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"8px"}}>
+            <button onClick={generateDashboard} disabled={loading||dashLoading}
+              style={{display:"flex",alignItems:"center",gap:"6px",background:loading||dashLoading?T.surface:T.amberDim,border:`1px solid ${loading||dashLoading?T.border:T.amberBorder}`,borderRadius:"20px",padding:"7px 16px",color:loading||dashLoading?T.mutedDark:T.amber,fontSize:"12px",fontWeight:600,transition:"all 0.15s"}}>
+              {dashLoading ? "⏳ Building dashboard…" : "⊞ Generate Dashboard"}
+            </button>
+          </div>
           <div style={{display:"flex",gap:"10px",alignItems:"flex-end",background:T.surface,border:`1px solid ${input.length>0?T.amberBorder:T.border}`,borderRadius:"14px",padding:"11px 13px",transition:"border-color 0.2s"}}>
             <textarea ref={inputRef} value={input} rows={1}
               onChange={e=>{setInput(e.target.value);e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
@@ -840,7 +947,7 @@ function AnalystPage({ db, llmConfig, user, onBack }) {
               style={{width:"36px",height:"36px",borderRadius:"10px",background:input.trim()&&!loading?T.amber:T.border,border:"none",color:input.trim()&&!loading?T.bg:T.mutedDark,fontSize:"16px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.15s",fontWeight:700}}>↑</button>
           </div>
           <div style={{textAlign:"center",fontSize:"11px",color:T.mutedDark,marginTop:"7px"}}>
-            QueryMind generates SQL from your schema — verify critical decisions against your live database
+            Only SELECT queries run — QueryMind never modifies your data
           </div>
         </div>
       </div>

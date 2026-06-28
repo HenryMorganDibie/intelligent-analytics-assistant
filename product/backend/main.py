@@ -157,31 +157,118 @@ class ConnectionQueryRequest(BaseModel):
 class SchemaIntrospectRequest(BaseModel):
     connection_string: str
 
-# ── LLM caller ────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT_TEMPLATE = """You are QueryMind — a senior data analyst, scientist, and business strategist.
+class DashboardRequest(BaseModel):
+    schema_ddl: str
+    focus: Optional[str] = None   # e.g. "revenue", "customers", "products" — optional focus area
+    provider: Optional[str] = None
+    api_key:  Optional[str] = None
+    model:    Optional[str] = None
 
-The user has this database schema:
+# ── SQL Safety ────────────────────────────────────────────────────────────────
+ALLOWED_SQL_STARTS = ("SELECT", "WITH", "EXPLAIN")
+BLOCKED_KEYWORDS   = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
+                      "CREATE", "REPLACE", "MERGE", "CALL", "EXEC", "GRANT",
+                      "REVOKE", "ATTACH", "DETACH")
+
+def validate_sql(sql: str) -> str:
+    """
+    Enforces read-only SQL. Raises HTTPException if any write/DDL keyword is present.
+    Returns the cleaned SQL string.
+    """
+    cleaned = sql.strip().rstrip(";").strip()
+    upper   = cleaned.upper()
+
+    # Must start with an allowed keyword
+    if not upper.startswith(ALLOWED_SQL_STARTS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"QueryMind only permits SELECT / WITH / EXPLAIN queries. "
+                   f"Got: {cleaned[:60]}..."
+        )
+
+    # Block dangerous keywords anywhere in the statement
+    for kw in BLOCKED_KEYWORDS:
+        # Check for keyword as a whole word (not substring of column names)
+        pattern = rf"\b{kw}\b"
+        if re.search(pattern, upper):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Blocked keyword detected: {kw}. Only read queries are permitted."
+            )
+
+    # Enforce row limit — prevent SELECT * FROM huge_table accidents
+    if "LIMIT" not in upper:
+        cleaned = f"{cleaned} LIMIT 500"
+
+    return cleaned
+
+# ── LLM caller ────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT_TEMPLATE = """You are QueryMind — a world-class business analyst and SQL expert.
+
+DATABASE SCHEMA:
 {schema}
 
-For every question you MUST respond with valid JSON only (no markdown, no backticks):
+YOUR JOB:
+Translate the user's business question into an accurate SQL query, generate realistic sample data, and interpret the results like a senior analyst briefing a founder.
+
+STRICT RULES — follow every one exactly:
+1. ONLY generate SELECT or WITH (CTE) queries. Never INSERT, UPDATE, DELETE, DROP, ALTER, or any write operation.
+2. Only reference tables and columns that exist in the schema above. Never invent table or column names.
+3. If the question cannot be answered from the schema, set confidence to "low" and explain clearly in the narrative what data is missing.
+4. data must be realistic and internally consistent — if revenue is $500K total, individual rows must sum to that. Never contradict yourself.
+5. keyMetrics values must come directly from the data array — never fabricate numbers not present in the data.
+6. narrative must be 4-6 sentences written like a senior analyst briefing a founder: lead with the main finding, explain the business implication, flag any caveats or follow-up questions.
+7. vizType must match the actual shape of the data: use "area" for time-series, "pie" only if ≤7 categories, "stat"/"stats" for single-row results, "bar" for ranked comparisons, "table" for multi-column detail.
+8. headline must be a direct factual statement, not a question and not vague. Bad: "Revenue trends". Good: "Q3 revenue grew 18% driven by enterprise customers."
+
+RESPOND WITH VALID JSON ONLY — no markdown, no backticks, no explanation outside the JSON:
 {{
-  "sql": "SELECT ...",
-  "data": [...up to 15 realistic rows the SQL would return...],
-  "keyMetrics": [{{"label": "...", "value": "..."}}],
-  "headline": "Direct one-sentence finding",
-  "narrative": "4-6 sentence analyst-grade interpretation with business context and caveats",
-  "confidence": "high" | "medium" | "low",
-  "vizType": "bar" | "line" | "area" | "pie" | "table" | "stat" | "stats"
-}}
+  "sql": "SELECT ... (read-only, references only real schema columns)",
+  "data": [ ... up to 15 rows, internally consistent ... ],
+  "keyMetrics": [ {{"label": "string", "value": "formatted string e.g. $2.4M or 34%"}} ],
+  "headline": "Direct factual one-sentence finding",
+  "narrative": "4-6 sentences. Lead with finding. Explain business implication. Flag caveats.",
+  "confidence": "high | medium | low",
+  "vizType": "bar | line | area | pie | table | stat | stats"
+}}"""
 
-Rules:
-- SQL must be valid and executable against the schema provided
-- Be honest — if the schema lacks data to answer, say so in narrative and set confidence to "low"
-- narrative reads like a senior analyst briefing a founder, not a chatbot
-- vizType must match the shape of the data"""
+DASHBOARD_SYSTEM_PROMPT = """You are QueryMind — a world-class business analyst.
 
-async def call_llm(provider: str, api_key: str, model: str, schema: str, question: str) -> dict:
-    system = SYSTEM_PROMPT_TEMPLATE.format(schema=schema)
+DATABASE SCHEMA:
+{schema}
+
+The user wants a complete business dashboard. Generate 4-6 panels that together give a complete picture of the business.
+
+STRICT RULES:
+1. Only reference tables and columns that EXIST in the schema. Never invent table or column names.
+2. Every SQL must be SELECT or WITH only. No write operations.
+3. Data in each panel must be realistic and internally consistent across all panels.
+4. Each panel must have a different angle: mix revenue, volume, trends, segments, outliers.
+5. keyMetrics values must come from the data — never fabricate numbers.
+6. Choose vizType to best communicate each panel's insight.
+
+RESPOND WITH VALID JSON ONLY:
+{{
+  "title": "Dashboard title e.g. 'E-commerce Business Overview'",
+  "summary": "2-3 sentence executive summary of overall business health",
+  "panels": [
+    {{
+      "id": 1,
+      "title": "Panel title",
+      "sql": "SELECT ...",
+      "data": [ ...up to 12 rows... ],
+      "keyMetrics": [ {{"label": "...", "value": "..."}} ],
+      "headline": "Direct factual finding for this panel",
+      "narrative": "2-3 sentences interpreting this panel's data",
+      "vizType": "bar | line | area | pie | table | stat | stats",
+      "confidence": "high | medium | low"
+    }}
+  ]
+}}\n"""
+
+async def call_llm(provider: str, api_key: str, model: str, schema: str, question: str,
+                   system_override: str = None) -> dict:
+    system = (system_override or SYSTEM_PROMPT_TEMPLATE).format(schema=schema)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         if provider == "claude":
@@ -278,8 +365,9 @@ def introspect_schema(engine) -> str:
     return "\n\n".join(lines)
 
 def execute_sql(engine, sql: str) -> list[dict]:
+    safe_sql = validate_sql(sql)
     with engine.connect() as conn:
-        result = conn.execute(text(sql))
+        result = conn.execute(text(safe_sql))
         cols = list(result.keys())
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
@@ -400,6 +488,12 @@ async def query_from_schema(
     provider, api_key, model = resolve_llm_config(req.provider, req.api_key, req.model, user)
     try:
         result = await call_llm(provider, api_key, model, req.schema_ddl, req.question)
+        # Validate the SQL the LLM returned — catch any write operations
+        if result.get("sql"):
+            try:
+                result["sql"] = validate_sql(result["sql"])
+            except HTTPException as e:
+                raise HTTPException(status_code=400, detail=f"LLM generated an unsafe query: {e.detail}")
         return {
             "mode": "schema",
             "question": req.question,
@@ -460,6 +554,50 @@ Return JSON with keyMetrics, headline, narrative (4-6 sentences), confidence, vi
         "row_count": len(real_data),
         "tier": "pro" if (user and user.get("is_pro")) else "free",
         **{k: v for k, v in narration.items() if k != "sql"},
+    }
+
+@app.post("/dashboard")
+async def generate_dashboard(
+    req: DashboardRequest,
+    user: Optional[dict] = Depends(get_optional_user)
+):
+    """
+    Generates a complete multi-panel business dashboard from a schema.
+    Each panel has its own SQL, data, chart type, headline, and narrative.
+    Returns 4-6 panels covering different business angles.
+    """
+    provider, api_key, model = resolve_llm_config(req.provider, req.api_key, req.model, user)
+
+    focus_clause = f"\n\nFocus area: {req.focus}" if req.focus else ""
+    question = f"Generate a complete business dashboard for this schema.{focus_clause}"
+
+    try:
+        raw = await call_llm(
+            provider, api_key, model,
+            req.schema_ddl, question,
+            system_override=DASHBOARD_SYSTEM_PROMPT
+        )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"LLM error: {e.response.text[:300]}")
+
+    # Validate each panel's SQL
+    if "panels" in raw:
+        for panel in raw["panels"]:
+            sql = panel.get("sql", "")
+            if sql:
+                try:
+                    panel["sql"] = validate_sql(sql)
+                except HTTPException as e:
+                    # Don't fail the whole dashboard — mark the panel as unsafe
+                    panel["sql"] = ""
+                    panel["headline"] = "Query blocked for safety"
+                    panel["narrative"] = f"The generated query was blocked: {e.detail}"
+                    panel["confidence"] = "low"
+
+    return {
+        "mode": "dashboard",
+        "tier": "pro" if (user and user.get("is_pro")) else "free",
+        **raw
     }
 
 @app.post("/introspect")
