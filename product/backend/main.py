@@ -658,8 +658,8 @@ def health():
 async def upload_file(file: UploadFile = File(...)):
     """
     Accept CSV, TSV, Parquet, Excel, or NDJSON.
-    Load into DuckDB, detect schema, return session_id + schema + preview.
-    Handles millions of rows — DuckDB streams from disk, never loads all into RAM.
+    Sanitizes all column names — replaces colons, spaces, special chars with underscores.
+    Stores a clean Parquet copy internally so DuckDB can always query safely.
     """
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -668,92 +668,95 @@ async def upload_file(file: UploadFile = File(...)):
             detail=f"Unsupported file type '{suffix}'. Supported: {', '.join(SUPPORTED_EXTENSIONS.keys())}"
         )
 
-    # Save to disk
     session_id = str(uuid.uuid4())
-    save_path = UPLOAD_DIR / f"{session_id}{suffix}"
+    save_path  = UPLOAD_DIR / f"{session_id}{suffix}"
 
     content = await file.read()
     save_path.write_bytes(content)
     file_size_mb = len(content) / (1024 * 1024)
 
     try:
-        con = duckdb.connect()
-        table_name = "dataset"
-
-        # Load file into DuckDB view (lazy — doesn't pull all rows into RAM)
+        # Load into pandas so we can sanitize column names
         if suffix == ".csv":
-            con.execute(f"""
-                CREATE VIEW {table_name} AS
-                SELECT * FROM read_csv_auto('{save_path}', header=true, sample_size=10000)
-            """)
+            df = pd.read_csv(save_path, low_memory=False)
         elif suffix == ".tsv":
-            con.execute(f"""
-                CREATE VIEW {table_name} AS
-                SELECT * FROM read_csv_auto('{save_path}', header=true, delim='\\t', sample_size=10000)
-            """)
+            df = pd.read_csv(save_path, sep="\t", low_memory=False)
         elif suffix == ".parquet":
-            con.execute(f"""
-                CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{save_path}')
-            """)
+            df = pd.read_parquet(save_path)
         elif suffix in (".xlsx", ".xls"):
-            parquet_path = UPLOAD_DIR / f"{session_id}.parquet"
             df = pd.read_excel(save_path, engine="openpyxl")
-            df.to_parquet(parquet_path, index=False)
-            con.execute(f"""
-                CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{parquet_path}')
-            """)
         elif suffix == ".json":
-            con.execute(f"""
-                CREATE VIEW {table_name} AS
-                SELECT * FROM read_ndjson_auto('{save_path}')
-            """)
+            df = pd.read_json(save_path, lines=True)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format")
 
-        # Get column info
-        cols_raw = con.execute(f"DESCRIBE {table_name}").fetchall()
-        columns = [{"name": row[0], "type": row[1]} for row in cols_raw]
+        # Sanitize column names — any non-alphanumeric char → underscore
+        original_columns = list(df.columns)
+        clean_cols = []
+        seen = {}
+        for col in original_columns:
+            clean = re.sub(r"[^a-zA-Z0-9_]", "_", str(col))
+            clean = re.sub(r"_+", "_", clean).strip("_").lower()
+            if not clean or clean[0].isdigit():
+                clean = "col_" + clean
+            if clean in seen:
+                seen[clean] += 1
+                clean = f"{clean}_{seen[clean]}"
+            else:
+                seen[clean] = 0
+            clean_cols.append(clean)
 
-        # Row count (fast for parquet, full scan for CSV)
+        df.columns = clean_cols
+        col_mapping = {orig: clean for orig, clean in zip(original_columns, clean_cols)}
+
+        # Save as clean Parquet — fastest format for DuckDB
+        parquet_path = UPLOAD_DIR / f"{session_id}_clean.parquet"
+        df.to_parquet(parquet_path, index=False)
+
+        # Query via DuckDB
+        table_name = "dataset"
+        con = duckdb.connect()
+        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{parquet_path}')")
+        cols_raw  = con.execute(f"DESCRIBE {table_name}").fetchall()
+        columns   = [{"name": row[0], "type": row[1]} for row in cols_raw]
         row_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        preview   = con.execute(f"SELECT * FROM {table_name} LIMIT 5").fetchdf().to_dict(orient="records")
+        con.close()
 
-        # Preview: first 5 rows
-        preview_rows = con.execute(f"SELECT * FROM {table_name} LIMIT 5").fetchdf()
-        preview = preview_rows.to_dict(orient="records")
-
-        # Build DDL-style schema string for LLM
-        schema_ddl = f"CREATE TABLE {table_name} (\n"
+        # DDL for LLM — uses clean column names
+        schema_ddl  = f"CREATE TABLE {table_name} (\n"
         schema_ddl += ",\n".join(f"  {c['name']} {c['type']}" for c in columns)
         schema_ddl += "\n);"
 
-        # Store session
         file_sessions[session_id] = {
-            "path": str(save_path),
-            "suffix": suffix,
-            "table_name": table_name,
-            "schema_ddl": schema_ddl,
-            "columns": columns,
-            "row_count": row_count,
-            "filename": file.filename,
+            "path":        str(parquet_path),
+            "suffix":      ".parquet",
+            "table_name":  table_name,
+            "schema_ddl":  schema_ddl,
+            "columns":     columns,
+            "col_mapping": col_mapping,
+            "row_count":   row_count,
+            "filename":    file.filename,
         }
-        con.close()
 
         return {
-            "session_id": session_id,
-            "filename": file.filename,
-            "file_type": SUPPORTED_EXTENSIONS[suffix],
+            "session_id":   session_id,
+            "filename":     file.filename,
+            "file_type":    SUPPORTED_EXTENSIONS[suffix],
             "file_size_mb": round(file_size_mb, 2),
-            "row_count": row_count,
+            "row_count":    row_count,
             "column_count": len(columns),
-            "columns": columns,
-            "schema_ddl": schema_ddl,
-            "preview": preview,
+            "columns":      columns,
+            "col_mapping":  col_mapping,
+            "schema_ddl":   schema_ddl,
+            "preview":      preview,
         }
 
-    except duckdb.Error as e:
-        save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"Could not read file: {str(e)[:300]}")
+    except HTTPException:
+        raise
     except Exception as e:
         save_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:300]}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)[:400]}")
 
 
 @app.post("/file/query")
@@ -814,19 +817,8 @@ async def query_file(
     # ── Execute REAL SQL against the actual file via DuckDB ───────────────────
     try:
         con = duckdb.connect()
-
-        # Register the file as the table
-        if suffix == ".csv":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}', header=true, sample_size=10000)")
-        elif suffix == ".tsv":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}', header=true, delim='\\t', sample_size=10000)")
-        elif suffix == ".parquet":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
-        elif suffix in (".xlsx", ".xls"):
-            parquet_path = str(file_path).replace(suffix, ".parquet")
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{parquet_path}')")
-        elif suffix == ".json":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_ndjson_auto('{file_path}')")
+        # Sessions always store a clean Parquet file after upload sanitization
+        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
 
         result_df = con.execute(sql).fetchdf()
         con.close()
@@ -907,16 +899,9 @@ async def get_file_sample(session_id: str, rows: int = 20):
     rows = min(rows, 100)
     try:
         con = duckdb.connect()
-        suffix = session["suffix"]
-        file_path = session["path"]
+        file_path  = session["path"]
         table_name = session["table_name"]
-        if suffix == ".csv":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}', header=true)")
-        elif suffix == ".parquet":
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
-        elif suffix in (".xlsx", ".xls"):
-            parquet_path = str(file_path).replace(suffix, ".parquet")
-            con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{parquet_path}')")
+        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
         sample = con.execute(f"SELECT * FROM {table_name} LIMIT {rows}").fetchdf()
         con.close()
         return {"data": sample.to_dict(orient="records"), "columns": session["columns"]}
@@ -1055,18 +1040,7 @@ async def generate_dashboard(
             if is_file:
                 try:
                     con = duckdb.connect()
-                    if suffix == ".csv":
-                        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}', header=true, sample_size=10000)")
-                    elif suffix == ".tsv":
-                        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_csv_auto('{file_path}', header=true, delim='\\t', sample_size=10000)")
-                    elif suffix == ".parquet":
-                        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
-                    elif suffix in (".xlsx", ".xls"):
-                        parquet_path = str(file_path).replace(suffix, ".parquet")
-                        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{parquet_path}')")
-                    elif suffix == ".json":
-                        con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_ndjson_auto('{file_path}')")
-
+                    con.execute(f"CREATE VIEW {table_name} AS SELECT * FROM read_parquet('{file_path}')")
                     result_df = con.execute(sql).fetchdf()
                     con.close()
                     panel["data"] = result_df.to_dict(orient="records")[:100]
